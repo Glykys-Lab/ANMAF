@@ -131,6 +131,15 @@ def centroid(arr1, arr2):
     
     
 
+def record_skipped_file(result_dir, file_name, reason):
+    """Record a stack/image that produced no usable ANMAF output."""
+    os.makedirs(result_dir, exist_ok=True)
+    report_path = os.path.join(result_dir, 'skipped_files.txt')
+    with open(report_path, 'a', encoding='utf-8') as f:
+        f.write(f"{file_name}\t{reason}\n")
+    print('SKIPPED FILE:', file_name, '-', reason)
+
+
 def detection(data_dir, alist, result_dir, microns):
     
     t_res = microns/512   # microns per 512 pixels (transversal)
@@ -190,6 +199,17 @@ def detection(data_dir, alist, result_dir, microns):
             label_stack.append(labels)
             print(labels)
 
+        # If this stack/image produced no detections, do not create an empty
+        # RoiSet.zip or a blank/unchanged PNG. Instead, record the skipped file
+        # in Detection_Results/skipped_files.txt and continue with the next stack.
+        if label == 0:
+            reason = 'ANMAF found 0 detections for this file'
+            if len(tiffs) == 0:
+                record_skipped_file(result_dir, case, reason)
+            else:
+                for skipped_tiff in tiffs:
+                    record_skipped_file(result_dir, skipped_tiff, reason)
+            continue
 
         # Generate detected results
         result_path = result_dir + '/' + case +  '/Z_Projection_Overlayed'
@@ -213,6 +233,9 @@ def detection(data_dir, alist, result_dir, microns):
             for j, (mask, roi) in enumerate(zip(masks.transpose(2,0,1), rois)):
                 
                 contours = find_contours(mask)
+                if len(contours) == 0:
+                    print('No contour found for overlay mask, skipping.')
+                    continue
                 if (len(contours)>1):
                     area_lst = []
                     for acontour in contours:
@@ -272,6 +295,9 @@ def detection(data_dir, alist, result_dir, microns):
                     print(amask.shape)
 
                     contours = find_contours(amask)
+                    if len(contours) == 0:
+                        print('No contour found for ROI mask, skipping label %d' % i)
+                        continue
                     if (len(contours)>1):
                         area_lst = []
                         for acontour in contours:
@@ -300,14 +326,35 @@ def detection(data_dir, alist, result_dir, microns):
 
             print('label %d: %s %f %f %f'%(i, num_slice, valid_area, cen_info[0], cen_info[1]))
 
-        df = pd.DataFrame(data)
-        df.columns = ['Slice_Index', 'Shoelace Area (px^2)', 'X (px)', 'Y (px)', 'Shoelace Area (um^2)']
+        columns = [
+            'Slice_Index',
+            'Shoelace Area (px^2)',
+            'X (px)',
+            'Y (px)',
+            'Shoelace Area (um^2)'
+        ]
 
+        # Some stacks can legitimately have 0 detections.
+        # The old code crashed here because an empty DataFrame has 0 columns,
+        # then df.columns tried to assign 5 names.
+        df = pd.DataFrame(data, columns=columns)
         df.to_csv(result_path + '/table.csv')
+
+        if len(total_mask) == 0:
+            reason = 'ANMAF found detections, but none could be converted into usable ROI contours'
+            for skipped_tiff in tiffs:
+                record_skipped_file(result_dir, skipped_tiff, reason)
+            print('No usable ROI files were created for this stack. Skipping PNG/ZIP output.')
+            if os.path.exists(result_path):
+                shutil.rmtree(result_path)
+            continue
+
         total_mask = np.array(total_mask)
         total_mask = total_mask.transpose(1,2,0)
+
         print(total_mask.shape)
         np.save(result_path + '/masks.npy', total_mask)
+
         shutil.make_archive(result_path+'/'+'RoiSet', 'zip', roi_path)
         print('Results Saved')
 
